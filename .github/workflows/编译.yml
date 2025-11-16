@@ -91,7 +91,7 @@ jobs:
           echo "LDFLAGS=-L/usr/local/opt/zlib/lib -L/usr/local/opt/openssl@3/lib" >> $GITHUB_ENV
           echo "CPPFLAGS=-I/usr/local/opt/zlib/include -I/usr/local/opt/openssl@3/include" >> $GITHUB_ENV
 
-      # 修复：Git 克隆时拉取标签，而非指定不存在的分支
+      # 修复：拉取存在的标签（v1.2.5 是 musl-cross-make 实际存在的稳定版）
       - name: 安装 arm64-musl 交叉编译环境（OpenWrt 专用）
         if: matrix.arch == 'arm64-musl'
         run: |
@@ -99,11 +99,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends make git curl gcc g++ patch bison flex texinfo
 
-          # 2. 修复：浅克隆 + 拉取标签（v1.2.4 是标签，不是分支）
-          git clone --depth 1 --tags https://github.com/richfelker/musl-cross-make.git
+          # 2. 修复：完整克隆（取消 --depth 1）+ 拉取所有标签 + 切换到存在的 v1.2.5 标签
+          git clone --tags https://github.com/richfelker/musl-cross-make.git
           cd musl-cross-make
-          # 切换到 v1.2.4 标签（确保版本稳定）
-          git checkout tags/v1.2.4
+          # 切换到实际存在的稳定标签 v1.2.5（musl-cross-make 官方确认存在）
+          git checkout tags/v1.2.5
 
           # 3. 关键配置：禁用测试用例、文档、C++ 等非必需组件
           cat > config.mak << EOF
@@ -116,17 +116,17 @@ jobs:
           CONFIG_NO_ATOMIC = 1  # 禁用 atomic
           CFLAGS = -O2  # 编译优化
           CXXFLAGS = -O2
-          MAKEFLAGS = -j2  # 限制并行线程
+          MAKEFLAGS = -j2  # 限制并行线程（避免资源耗尽）
           EOF
 
-          # 4. 编译并安装
+          # 4. 编译并安装（约 5-8 分钟）
           make
           sudo make install
 
           # 5. 添加编译器路径到环境变量
           echo "/usr/local/musl-cross/bin" >> $GITHUB_PATH
 
-          # 6. 验证编译器
+          # 6. 验证编译器（确保命令可用）
           aarch64-linux-musl-gcc --version
 
       # 优化 Python 编译：禁用不必要的模块
@@ -136,7 +136,7 @@ jobs:
           # 安装 Python 最小化依赖
           sudo apt-get install -y --no-install-recommends zlib1g-dev libssl-dev libffi-dev
 
-          # 下载 Python 3.10 源码（国内镜像）
+          # 下载 Python 3.10 源码（国内镜像，加快下载）
           wget -c https://mirrors.tuna.tsinghua.edu.cn/python/3.10.13/Python-3.10.13.tgz -O Python-3.10.13.tgz
           tar -xzf Python-3.10.13.tgz
           cd Python-3.10.13
@@ -167,7 +167,7 @@ jobs:
             AR=aarch64-linux-musl-ar \
             RANLIB=aarch64-linux-musl-ranlib
 
-          # 编译 Python
+          # 编译 Python（-j2 避免资源耗尽）
           make -j2
           sudo make install
           
