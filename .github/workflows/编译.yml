@@ -13,7 +13,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-    # 延长超时时间（编译编译器需要5-10分钟）
     timeout-minutes: 30
     
     strategy:
@@ -92,7 +91,7 @@ jobs:
           echo "LDFLAGS=-L/usr/local/opt/zlib/lib -L/usr/local/opt/openssl@3/lib" >> $GITHUB_ENV
           echo "CPPFLAGS=-I/usr/local/opt/zlib/include -I/usr/local/opt/openssl@3/include" >> $GITHUB_ENV
 
-      # 核心优化：简化 musl-cross-make 编译，禁用非必需组件
+      # 修复：Git 克隆时拉取标签，而非指定不存在的分支
       - name: 安装 arm64-musl 交叉编译环境（OpenWrt 专用）
         if: matrix.arch == 'arm64-musl'
         run: |
@@ -100,54 +99,49 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends make git curl gcc g++ patch bison flex texinfo
 
-          # 2. 下载 musl-cross-make（指定稳定版本，避免源码过大）
-          git clone --depth 1 --branch v1.2.4 https://github.com/richfelker/musl-cross-make.git  # 浅克隆，只拉最新版本
+          # 2. 修复：浅克隆 + 拉取标签（v1.2.4 是标签，不是分支）
+          git clone --depth 1 --tags https://github.com/richfelker/musl-cross-make.git
           cd musl-cross-make
+          # 切换到 v1.2.4 标签（确保版本稳定）
+          git checkout tags/v1.2.4
 
-          # 3. 关键配置：禁用测试用例、文档、C++ 等非必需组件，只编译 C 编译器
+          # 3. 关键配置：禁用测试用例、文档、C++ 等非必需组件
           cat > config.mak << EOF
           TARGET = aarch64-linux-musl
           OUTPUT = /usr/local/musl-cross
-          # 禁用 C++ 编译器（只需要 C 编译器，减少编译量）
-          CONFIG_NOCXX = 1
-          # 禁用 GCC 测试套件（核心优化，避免编译海量测试用例）
-          CONFIG_NO_TESTS = 1
-          # 禁用文档生成
-          CONFIG_NODOC = 1
-          # 禁用 libgfortran（非必需）
-          CONFIG_NO_FORTRAN = 1
-          # 禁用 libatomic（非必需）
-          CONFIG_NO_ATOMIC = 1
-          # 启用编译优化，加快编译速度
-          CFLAGS = -O2
+          CONFIG_NOCXX = 1  # 禁用 C++ 编译器
+          CONFIG_NO_TESTS = 1  # 禁用测试套件（核心优化）
+          CONFIG_NODOC = 1  # 禁用文档
+          CONFIG_NO_FORTRAN = 1  # 禁用 Fortran
+          CONFIG_NO_ATOMIC = 1  # 禁用 atomic
+          CFLAGS = -O2  # 编译优化
           CXXFLAGS = -O2
-          # 减少并行编译线程（避免资源耗尽，GitHub runner 推荐 -j2）
-          MAKEFLAGS = -j2
+          MAKEFLAGS = -j2  # 限制并行线程
           EOF
 
-          # 4. 编译并安装（仅核心 C 编译器，约 5-8 分钟）
+          # 4. 编译并安装
           make
           sudo make install
 
           # 5. 添加编译器路径到环境变量
           echo "/usr/local/musl-cross/bin" >> $GITHUB_PATH
 
-          # 6. 验证编译器（确保命令可用）
+          # 6. 验证编译器
           aarch64-linux-musl-gcc --version
 
-      # 优化 Python 编译：禁用不必要的模块，加快编译
+      # 优化 Python 编译：禁用不必要的模块
       - name: 构建静态链接的 Python（arm64-musl）
         if: matrix.arch == 'arm64-musl'
         run: |
           # 安装 Python 最小化依赖
           sudo apt-get install -y --no-install-recommends zlib1g-dev libssl-dev libffi-dev
 
-          # 下载 Python 3.10 源码（使用国内镜像，加快下载）
+          # 下载 Python 3.10 源码（国内镜像）
           wget -c https://mirrors.tuna.tsinghua.edu.cn/python/3.10.13/Python-3.10.13.tgz -O Python-3.10.13.tgz
           tar -xzf Python-3.10.13.tgz
           cd Python-3.10.13
           
-          # 配置 Python 静态编译：禁用非必需模块，减少编译量
+          # 配置 Python 静态编译
           ./configure \
             --prefix=/usr/local/python3.10-musl-arm64 \
             --build=x86_64-linux-gnu \
@@ -173,7 +167,7 @@ jobs:
             AR=aarch64-linux-musl-ar \
             RANLIB=aarch64-linux-musl-ranlib
 
-          # 编译 Python（-j2 避免资源耗尽）
+          # 编译 Python
           make -j2
           sudo make install
           
