@@ -13,6 +13,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    # 延长超时时间（编译编译器需要5-10分钟）
+    timeout-minutes: 30
     
     strategy:
       matrix:
@@ -72,8 +74,8 @@ jobs:
       - name: 设置 Python 环境
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'  # 升级到 3.10，提升 macOS 兼容性
-          cache: 'pip'  # 启用 pip 缓存，加速依赖安装
+          python-version: '3.10'
+          cache: 'pip'
 
       - name: 安装依赖（通用）
         run: |
@@ -82,7 +84,7 @@ jobs:
           pip install pyinstaller
           pip install --upgrade certifi urllib3 requests
 
-      # 优化 macOS 构建依赖（解决库缺失问题）
+      # 优化 macOS 构建依赖
       - name: 优化 macOS 构建依赖
         if: matrix.platform == 'macos'
         run: |
@@ -90,46 +92,62 @@ jobs:
           echo "LDFLAGS=-L/usr/local/opt/zlib/lib -L/usr/local/opt/openssl@3/lib" >> $GITHUB_ENV
           echo "CPPFLAGS=-I/usr/local/opt/zlib/include -I/usr/local/opt/openssl@3/include" >> $GITHUB_ENV
 
-      # 关键修改：安装 arm64-musl 交叉编译环境（通过 musl-cross-make 编译）
+      # 核心优化：简化 musl-cross-make 编译，禁用非必需组件
       - name: 安装 arm64-musl 交叉编译环境（OpenWrt 专用）
         if: matrix.arch == 'arm64-musl'
         run: |
-          # 1. 安装编译依赖（make、git 等）
+          # 1. 安装最小化编译依赖
           sudo apt-get update
-          sudo apt-get install -y make git curl gcc g++ patch bison flex texinfo
+          sudo apt-get install -y --no-install-recommends make git curl gcc g++ patch bison flex texinfo
 
-          # 2. 下载 musl-cross-make 工具（用于编译 musl 交叉编译器）
-          git clone https://github.com/richfelker/musl-cross-make.git
+          # 2. 下载 musl-cross-make（指定稳定版本，避免源码过大）
+          git clone --depth 1 --branch v1.2.4 https://github.com/richfelker/musl-cross-make.git  # 浅克隆，只拉最新版本
           cd musl-cross-make
 
-          # 3. 配置编译目标：aarch64-linux-musl
-          echo "TARGET = aarch64-linux-musl" > config.mak
-          # 配置安装路径（默认 /usr/local，无需 sudo 也能访问）
-          echo "OUTPUT = /usr/local/musl-cross" >> config.mak
+          # 3. 关键配置：禁用测试用例、文档、C++ 等非必需组件，只编译 C 编译器
+          cat > config.mak << EOF
+          TARGET = aarch64-linux-musl
+          OUTPUT = /usr/local/musl-cross
+          # 禁用 C++ 编译器（只需要 C 编译器，减少编译量）
+          CONFIG_NOCXX = 1
+          # 禁用 GCC 测试套件（核心优化，避免编译海量测试用例）
+          CONFIG_NO_TESTS = 1
+          # 禁用文档生成
+          CONFIG_NODOC = 1
+          # 禁用 libgfortran（非必需）
+          CONFIG_NO_FORTRAN = 1
+          # 禁用 libatomic（非必需）
+          CONFIG_NO_ATOMIC = 1
+          # 启用编译优化，加快编译速度
+          CFLAGS = -O2
+          CXXFLAGS = -O2
+          # 减少并行编译线程（避免资源耗尽，GitHub runner 推荐 -j2）
+          MAKEFLAGS = -j2
+          EOF
 
-          # 4. 编译并安装（-j4 加速，约 5-10 分钟）
-          make -j4
+          # 4. 编译并安装（仅核心 C 编译器，约 5-8 分钟）
+          make
           sudo make install
 
-          # 5. 将编译器路径添加到系统环境变量（让系统找到 aarch64-linux-musl-gcc）
+          # 5. 添加编译器路径到环境变量
           echo "/usr/local/musl-cross/bin" >> $GITHUB_PATH
 
-          # 6. 验证编译器是否安装成功（此时应该能找到命令）
+          # 6. 验证编译器（确保命令可用）
           aarch64-linux-musl-gcc --version
 
-      # 构建静态链接的 Python（OpenWrt 专用）
+      # 优化 Python 编译：禁用不必要的模块，加快编译
       - name: 构建静态链接的 Python（arm64-musl）
         if: matrix.arch == 'arm64-musl'
         run: |
-          # 安装 Python 编译依赖
-          sudo apt-get install -y zlib1g-dev libssl-dev libffi-dev
+          # 安装 Python 最小化依赖
+          sudo apt-get install -y --no-install-recommends zlib1g-dev libssl-dev libffi-dev
 
-          # 下载 Python 3.10 源码（适配 musl）
-          wget https://www.python.org/ftp/python/3.10.13/Python-3.10.13.tgz
+          # 下载 Python 3.10 源码（使用国内镜像，加快下载）
+          wget -c https://mirrors.tuna.tsinghua.edu.cn/python/3.10.13/Python-3.10.13.tgz -O Python-3.10.13.tgz
           tar -xzf Python-3.10.13.tgz
           cd Python-3.10.13
           
-          # 配置静态编译（使用刚安装的 aarch64-linux-musl-gcc）
+          # 配置 Python 静态编译：禁用非必需模块，减少编译量
           ./configure \
             --prefix=/usr/local/python3.10-musl-arm64 \
             --build=x86_64-linux-gnu \
@@ -140,46 +158,56 @@ jobs:
             --enable-static=yes \
             --with-ssl=/usr/local/musl-cross/aarch64-linux-musl \
             --with-zlib=/usr/lib/x86_64-linux-gnu \
+            --without-pymalloc \
+            --without-doc-strings \
+            --disable-test-modules \
+            --disable-ipv6 \
+            --disable-shared \
+            --disable-lib2to3 \
+            --disable-tk \
+            --disable-nis \
+            --disable-gdbm \
+            --disable-sqlite3 \
             CC=aarch64-linux-musl-gcc \
             CXX=aarch64-linux-musl-g++ \
             AR=aarch64-linux-musl-ar \
             RANLIB=aarch64-linux-musl-ranlib
 
-          # 编译安装（-j4 加速）
-          make -j4
+          # 编译 Python（-j2 避免资源耗尽）
+          make -j2
           sudo make install
           
           # 切换到静态 Python
           export PATH=/usr/local/python3.10-musl-arm64/bin:$PATH
           python3 --version
           
-          # 重新安装依赖（静态版本）
+          # 安装依赖
           python3 -m pip install --upgrade pip
           pip3 install -r requirements.txt
           pip3 install pyinstaller
           pip3 install --upgrade certifi urllib3 requests
 
-      # Windows 构建（保留 strip，Windows 兼容）
+      # Windows 构建
       - name: 构建可执行文件 (Windows)
         if: matrix.platform == 'windows'
         run: |
           python -m PyInstaller --onefile --name CloudflareSpeedTest-${{ matrix.platform }}-${{ matrix.arch }} --clean --console --hidden-import requests --hidden-import urllib3 --hidden-import certifi --hidden-import charset_normalizer --hidden-import idna --exclude-module tkinter --exclude-module matplotlib --exclude-module numpy --exclude-module pandas --exclude-module PIL --exclude-module cv2 --exclude-module scipy --strip --optimize 2 cloudflare_speedtest.py
 
-      # Linux 构建（保留 strip，Linux 兼容）
+      # Linux 构建
       - name: 构建可执行文件 (Linux)
         if: matrix.platform == 'linux' && matrix.arch != 'arm64-musl'
         run: |
           python -m PyInstaller --onefile --name CloudflareSpeedTest-${{ matrix.platform }}-${{ matrix.arch }} --clean --console --hidden-import requests --hidden-import urllib3 --hidden-import certifi --hidden-import charset_normalizer --hidden-import idna --exclude-module tkinter --exclude-module matplotlib --exclude-module numpy --exclude-module pandas --exclude-module PIL --exclude-module cv2 --exclude-module scipy --strip --optimize 2 cloudflare_speedtest.py
 
-      # macOS 构建（禁用 strip，解决动态库报错）
+      # macOS 构建
       - name: 构建可执行文件 (macOS)
         if: matrix.platform == 'macos'
         env:
-          PYINSTALLER_NO_SIGN: 1  # 禁用自动代码签名
+          PYINSTALLER_NO_SIGN: 1
         run: |
           python -m PyInstaller --onefile --name CloudflareSpeedTest-${{ matrix.platform }}-${{ matrix.arch }} --clean --console --hidden-import requests --hidden-import urllib3 --hidden-import certifi --hidden-import charset_normalizer --hidden-import idna --exclude-module tkinter --exclude-module matplotlib --exclude-module numpy --exclude-module pandas --exclude-module PIL --exclude-module cv2 --exclude-module scipy --optimize 2 --osx-bundle-identifier com.example.cloudflare-speedtest cloudflare_speedtest.py
 
-      # OpenWrt arm64-musl 构建（静态链接）
+      # OpenWrt arm64-musl 构建
       - name: 构建可执行文件 (OpenWrt arm64-musl)
         if: matrix.arch == 'arm64-musl'
         run: |
@@ -210,18 +238,18 @@ jobs:
             --runtime-tmpdir /tmp \
             cloudflare_speedtest.py
 
-      # Windows 重命名（适配后缀）
+      # Windows 重命名
       - name: 重命名文件（Windows）
         if: matrix.platform == 'windows'
         run: |
           move dist\CloudflareSpeedTest-${{ matrix.platform }}-${{ matrix.arch }}.exe dist\CloudflareSpeedTest-${{ matrix.platform }}-${{ matrix.arch }}${{ matrix.ext }}
 
-      # 赋予执行权限（Linux/macOS/OpenWrt）
+      # 赋予执行权限
       - name: 赋予执行权限（Linux/macOS + OpenWrt）
         if: matrix.platform != 'windows'
         run: chmod +x dist/CloudflareSpeedTest-${{ matrix.platform }}-${{ matrix.arch }}
 
-      # 验证 OpenWrt 产物是否为静态链接
+      # 验证产物
       - name: 验证 arm64-musl 产物静态链接
         if: matrix.arch == 'arm64-musl'
         run: |
@@ -229,7 +257,7 @@ jobs:
           file dist/CloudflareSpeedTest-${{ matrix.platform }}-${{ matrix.arch }}
           aarch64-linux-musl-objdump -p dist/CloudflareSpeedTest-${{ matrix.platform }}-${{ matrix.arch }} | grep NEEDED
 
-      # 上传构建产物
+      # 上传产物
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
@@ -237,7 +265,7 @@ jobs:
           path: dist/CloudflareSpeedTest-${{ matrix.platform }}-${{ matrix.arch }}${{ matrix.ext }}
           retention-days: 30
 
-  # 创建 Release（包含所有产物，包括 arm64-musl）
+  # 创建 Release
   release:
     name: Create Release
     needs: build
