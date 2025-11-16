@@ -90,24 +90,46 @@ jobs:
           echo "LDFLAGS=-L/usr/local/opt/zlib/lib -L/usr/local/opt/openssl@3/lib" >> $GITHUB_ENV
           echo "CPPFLAGS=-I/usr/local/opt/zlib/include -I/usr/local/opt/openssl@3/include" >> $GITHUB_ENV
 
-      # 安装 arm64-musl 交叉编译环境（OpenWrt 专用）
-      - name: 安装 arm64-musl 交叉编译环境
+      # 关键修改：安装 arm64-musl 交叉编译环境（通过 musl-cross-make 编译）
+      - name: 安装 arm64-musl 交叉编译环境（OpenWrt 专用）
         if: matrix.arch == 'arm64-musl'
         run: |
+          # 1. 安装编译依赖（make、git 等）
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu musl-tools musl-dev zlib1g-dev libssl-dev libffi-dev
-          aarch64-linux-musl-gcc --version  # 验证编译器
+          sudo apt-get install -y make git curl gcc g++ patch bison flex texinfo
+
+          # 2. 下载 musl-cross-make 工具（用于编译 musl 交叉编译器）
+          git clone https://github.com/richfelker/musl-cross-make.git
+          cd musl-cross-make
+
+          # 3. 配置编译目标：aarch64-linux-musl
+          echo "TARGET = aarch64-linux-musl" > config.mak
+          # 配置安装路径（默认 /usr/local，无需 sudo 也能访问）
+          echo "OUTPUT = /usr/local/musl-cross" >> config.mak
+
+          # 4. 编译并安装（-j4 加速，约 5-10 分钟）
+          make -j4
+          sudo make install
+
+          # 5. 将编译器路径添加到系统环境变量（让系统找到 aarch64-linux-musl-gcc）
+          echo "/usr/local/musl-cross/bin" >> $GITHUB_PATH
+
+          # 6. 验证编译器是否安装成功（此时应该能找到命令）
+          aarch64-linux-musl-gcc --version
 
       # 构建静态链接的 Python（OpenWrt 专用）
       - name: 构建静态链接的 Python（arm64-musl）
         if: matrix.arch == 'arm64-musl'
         run: |
-          # 下载 Python 源码
+          # 安装 Python 编译依赖
+          sudo apt-get install -y zlib1g-dev libssl-dev libffi-dev
+
+          # 下载 Python 3.10 源码（适配 musl）
           wget https://www.python.org/ftp/python/3.10.13/Python-3.10.13.tgz
           tar -xzf Python-3.10.13.tgz
           cd Python-3.10.13
           
-          # 配置静态编译
+          # 配置静态编译（使用刚安装的 aarch64-linux-musl-gcc）
           ./configure \
             --prefix=/usr/local/python3.10-musl-arm64 \
             --build=x86_64-linux-gnu \
@@ -116,12 +138,14 @@ jobs:
             --enable-optimizations \
             --enable-shared=no \
             --enable-static=yes \
-            --with-ssl=/usr/lib/aarch64-linux-gnu \
-            --with-zlib=/usr/lib/aarch64-linux-gnu \
+            --with-ssl=/usr/local/musl-cross/aarch64-linux-musl \
+            --with-zlib=/usr/lib/x86_64-linux-gnu \
             CC=aarch64-linux-musl-gcc \
-            CXX=aarch64-linux-musl-g++
-          
-          # 编译安装
+            CXX=aarch64-linux-musl-g++ \
+            AR=aarch64-linux-musl-ar \
+            RANLIB=aarch64-linux-musl-ranlib
+
+          # 编译安装（-j4 加速）
           make -j4
           sudo make install
           
@@ -179,10 +203,10 @@ jobs:
             --exclude-module scipy \
             --strip \
             --optimize 2 \
-            --add-binary "/usr/lib/aarch64-linux-musl/libc.so:." \
-            --add-binary "/usr/lib/aarch64-linux-musl/libz.so:." \
-            --add-binary "/usr/lib/aarch64-linux-musl/libssl.so:." \
-            --add-binary "/usr/lib/aarch64-linux-musl/libcrypto.so:." \
+            --add-binary "/usr/local/musl-cross/aarch64-linux-musl/lib/libc.so:." \
+            --add-binary "/usr/local/musl-cross/aarch64-linux-musl/lib/libz.so:." \
+            --add-binary "/usr/local/musl-cross/aarch64-linux-musl/lib/libssl.so:." \
+            --add-binary "/usr/local/musl-cross/aarch64-linux-musl/lib/libcrypto.so:." \
             --runtime-tmpdir /tmp \
             cloudflare_speedtest.py
 
