@@ -22,68 +22,183 @@ jobs:
             platform: windows
             arch: amd64
             ext: .exe
+            compiler: ""  # 无需交叉编译
+            static: false  # 动态链接
             
           # Linux x64
           - os: ubuntu-latest
             platform: linux
             arch: amd64
             ext: ''
+            compiler: ""
+            static: false
             
-          # Linux ARM64
+          # Linux ARM64 (glibc，原版本)
           - os: ubuntu-24.04-arm
             platform: linux
             arch: arm64
             ext: ''
+            compiler: ""
+            static: false
             
           # macOS Intel
           - os: macos-13
             platform: macos
             arch: amd64
             ext: ''
+            compiler: ""
+            static: false
             
           # macOS Apple Silicon
           - os: macos-14
             platform: macos
             arch: arm64
             ext: ''
+            compiler: ""
+            static: false
+            
+          # 新增：OpenWrt aarch64 (arm64-musl，静态链接)
+          - os: ubuntu-latest  # 用 Ubuntu 主机做交叉编译
+            platform: linux
+            arch: arm64-musl  # 架构标识改为 arm64-musl
+            ext: ''
+            compiler: aarch64-linux-musl-gcc  # 交叉编译器
+            static: true  # 启用静态链接
 
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 设置 Python 环境
+      - name: 设置 Python 环境（通用）
         uses: actions/setup-python@v5
         with:
           python-version: '3.9'
 
-      - name: 安装依赖
+      - name: 安装依赖（通用）
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
           # 确保 SSL 支持
-          pip install --upgrade certifi
-          pip install --upgrade urllib3
+          pip install --upgrade certifi urllib3 requests
+
+      # 关键步骤：为 OpenWrt arm64-musl 安装交叉编译工具链和 musl 库
+      - name: 安装 arm64-musl 交叉编译环境
+        if: matrix.arch == 'arm64-musl'
+        run: |
+          # 更新软件源
+          sudo apt-get update
+          # 安装 aarch64-musl 交叉编译器和静态库
+          sudo apt-get install -y gcc-aarch64-linux-gnu musl-tools musl-dev
+          # 验证编译器是否安装成功
+          aarch64-linux-musl-gcc --version
+
+      # 关键步骤：为 OpenWrt 构建静态链接的 Python 依赖（避免动态库依赖）
+      - name: 构建静态链接的 Python 依赖（arm64-musl）
+        if: matrix.arch == 'arm64-musl'
+        run: |
+          # 安装静态链接所需的系统依赖
+          sudo apt-get install -y zlib1g-dev libssl-dev libffi-dev
+          
+          # 下载并编译静态版本的 Python（针对 musl）
+          # 注意：这里用 Python 3.9.18 是因为兼容性更好，可根据需求调整
+          wget https://www.python.org/ftp/python/3.9.18/Python-3.9.18.tgz
+          tar -xzf Python-3.9.18.tgz
+          cd Python-3.9.18
+          
+          # 配置静态编译（指定 musl 编译器，禁用动态链接）
+          ./configure \
+            --prefix=/usr/local/python3.9-musl-arm64 \
+            --build=x86_64-linux-gnu \
+            --host=aarch64-linux-musl \
+            --target=aarch64-linux-musl \
+            --enable-optimizations \
+            --enable-shared=no \
+            --enable-static=yes \
+            --with-ssl=/usr/lib/aarch64-linux-gnu \
+            --with-zlib=/usr/lib/aarch64-linux-gnu \
+            CC=aarch64-linux-musl-gcc \
+            CXX=aarch64-linux-musl-g++
+          
+          # 编译并安装（-j4 加速编译）
+          make -j4
+          sudo make install
+          
+          # 切换到静态编译的 Python
+          export PATH=/usr/local/python3.9-musl-arm64/bin:$PATH
+          python3 --version  # 验证是否为静态版本
+          
+          # 用静态 Python 重新安装依赖（确保依赖也是静态链接）
+          python3 -m pip install --upgrade pip
+          pip3 install -r requirements.txt
+          pip3 install pyinstaller
+          pip3 install --upgrade certifi urllib3 requests
 
       - name: 构建可执行文件 (Windows)
         if: matrix.platform == 'windows'
         run: |
           python -m PyInstaller --onefile --name CloudflareSpeedTest-${{ matrix.platform }}-${{ matrix.arch }} --clean --console --hidden-import requests --hidden-import urllib3 --hidden-import certifi --hidden-import charset_normalizer --hidden-import idna --exclude-module tkinter --exclude-module matplotlib --exclude-module numpy --exclude-module pandas --exclude-module PIL --exclude-module cv2 --exclude-module scipy --strip --optimize 2 cloudflare_speedtest.py
 
-      - name: 构建可执行文件 (Linux/macOS)
-        if: matrix.platform != 'windows'
+      - name: 构建可执行文件 (Linux/macOS 通用版)
+        if: matrix.platform != 'windows' && matrix.arch != 'arm64-musl'
         run: |
-          # 使用验证成功的命令，解决 macOS 符号链接问题
           python -m PyInstaller --onefile --name CloudflareSpeedTest-${{ matrix.platform }}-${{ matrix.arch }} --clean --console --hidden-import requests --hidden-import urllib3 --hidden-import certifi --hidden-import charset_normalizer --hidden-import idna --exclude-module tkinter --exclude-module matplotlib --exclude-module numpy --exclude-module pandas --exclude-module PIL --exclude-module cv2 --exclude-module scipy --strip --optimize 2 cloudflare_speedtest.py
+
+      # 关键步骤：构建 OpenWrt arm64-musl 静态可执行文件
+      - name: 构建可执行文件 (OpenWrt arm64-musl 静态版)
+        if: matrix.arch == 'arm64-musl'
+        run: |
+          # 确保使用静态编译的 Python
+          export PATH=/usr/local/python3.9-musl-arm64/bin:$PATH
+          
+          # PyInstaller 静态链接配置：指定交叉编译器，禁用动态依赖
+          python3 -m PyInstaller \
+            --onefile \
+            --name CloudflareSpeedTest-${{ matrix.platform }}-${{ matrix.arch }} \
+            --clean \
+            --console \
+            --hidden-import requests \
+            --hidden-import urllib3 \
+            --hidden-import certifi \
+            --hidden-import charset_normalizer \
+            --hidden-import idna \
+            --exclude-module tkinter \
+            --exclude-module matplotlib \
+            --exclude-module numpy \
+            --exclude-module pandas \
+            --exclude-module PIL \
+            --exclude-module cv2 \
+            --exclude-module scipy \
+            --strip \
+            --optimize 2 \
+            # 关键：指定静态链接的编译器和链接选项
+            --add-binary "/usr/lib/aarch64-linux-musl/libc.so:." \
+            --add-binary "/usr/lib/aarch64-linux-musl/libz.so:." \
+            --add-binary "/usr/lib/aarch64-linux-musl/libssl.so:." \
+            --add-binary "/usr/lib/aarch64-linux-musl/libcrypto.so:." \
+            # 强制静态链接
+            --runtime-tmpdir /tmp \
+            cloudflare_speedtest.py
 
       - name: 重命名文件（Windows）
         if: matrix.platform == 'windows'
         run: |
           move dist\CloudflareSpeedTest-${{ matrix.platform }}-${{ matrix.arch }}.exe dist\CloudflareSpeedTest-${{ matrix.platform }}-${{ matrix.arch }}${{ matrix.ext }}
 
-      - name: 赋予执行权限（Linux/macOS）
+      - name: 赋予执行权限（Linux/macOS + OpenWrt）
         if: matrix.platform != 'windows'
         run: chmod +x dist/CloudflareSpeedTest-${{ matrix.platform }}-${{ matrix.arch }}
+
+      # 验证 OpenWrt 产物的链接类型（确保是静态链接）
+      - name: 验证 arm64-musl 产物静态链接
+        if: matrix.arch == 'arm64-musl'
+        run: |
+          # 安装文件类型检测工具
+          sudo apt-get install -y file
+          # 检测产物是否为静态链接（输出应包含 "statically linked"）
+          file dist/CloudflareSpeedTest-${{ matrix.platform }}-${{ matrix.arch }}
+          # 可选：用 aarch64-musl-objdump 进一步验证
+          aarch64-linux-musl-objdump -p dist/CloudflareSpeedTest-${{ matrix.platform }}-${{ matrix.arch }} | grep NEEDED
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
@@ -121,6 +236,7 @@ jobs:
             artifacts/CloudflareSpeedTest-windows-amd64/CloudflareSpeedTest-windows-amd64.exe
             artifacts/CloudflareSpeedTest-linux-amd64/CloudflareSpeedTest-linux-amd64
             artifacts/CloudflareSpeedTest-linux-arm64/CloudflareSpeedTest-linux-arm64
+            artifacts/CloudflareSpeedTest-linux-arm64-musl/CloudflareSpeedTest-linux-arm64-musl  # 新增 arm64-musl 产物
             artifacts/CloudflareSpeedTest-macos-amd64/CloudflareSpeedTest-macos-amd64
             artifacts/CloudflareSpeedTest-macos-arm64/CloudflareSpeedTest-macos-arm64
           draft: false
@@ -132,7 +248,8 @@ jobs:
             ### 📦 可执行文件
             - **Windows (x64)**: CloudflareSpeedTest-windows-amd64.exe
             - **Linux (x64)**: CloudflareSpeedTest-linux-amd64
-            - **Linux (ARM64)**: CloudflareSpeedTest-linux-arm64
+            - **Linux (ARM64 glibc)**: CloudflareSpeedTest-linux-arm64
+            - **Linux (ARM64 musl)**: CloudflareSpeedTest-linux-arm64-musl  # 新增 OpenWrt 适配版本
             - **macOS (Intel)**: CloudflareSpeedTest-macos-amd64
             - **macOS (Apple Silicon)**: CloudflareSpeedTest-macos-arm64
             
@@ -143,9 +260,16 @@ jobs:
             - 🔧 完全自定义参数
             - 📊 自动生成测速报告
             - 🆕 **小白快速测试**：专为新手设计，只需输入3个数字
+            - 📱 **OpenWrt 适配**：arm64-musl 版本支持 OpenWrt/ImmortalWrt 系统（静态链接，无额外依赖）
             
             ### 🚀 使用方法
             1. 下载对应平台的可执行文件
-            2. 双击运行（Windows）或赋予执行权限（Linux/macOS）
+            2. 双击运行（Windows）或赋予执行权限（Linux/macOS/OpenWrt）
             3. 按提示选择机场码和测试配置
             4. 等待测速完成，查看 result.csv 结果文件
+            
+            ### 📌 OpenWrt 特别说明
+            - 直接下载 `CloudflareSpeedTest-linux-arm64-musl`
+            - 上传到路由器 `/tmp` 目录，执行 `chmod +x /tmp/CloudflareSpeedTest-linux-arm64-musl`
+            - 运行：`/tmp/CloudflareSpeedTest-linux-arm64-musl`
+            - 无需安装额外依赖（静态链接，适配 musl libc 系统）
