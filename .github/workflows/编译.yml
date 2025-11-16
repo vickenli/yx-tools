@@ -13,7 +13,7 @@ jobs:
     permissions:
       contents: read
       packages: write
-    timeout-minutes: 30
+    timeout-minutes: 45  # 延长超时时间
     
     strategy:
       matrix:
@@ -79,9 +79,9 @@ jobs:
       - name: 安装依赖（通用）
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pyinstaller
-          pip install --upgrade certifi urllib3 requests
+          pip install --no-cache-dir --progress-bar off -r requirements.txt
+          pip install --no-cache-dir --progress-bar off pyinstaller
+          pip install --no-cache-dir --progress-bar off certifi urllib3 requests
 
       # 优化 macOS 构建依赖
       - name: 优化 macOS 构建依赖
@@ -91,21 +91,19 @@ jobs:
           echo "LDFLAGS=-L/usr/local/opt/zlib/lib -L/usr/local/opt/openssl@3/lib" >> $GITHUB_ENV
           echo "CPPFLAGS=-I/usr/local/opt/zlib/include -I/usr/local/opt/openssl@3/include" >> $GITHUB_ENV
 
-      # 修复：拉取存在的标签（v1.2.5 是 musl-cross-make 实际存在的稳定版）
+      # 核心修复：克隆 master 主分支，跳过标签切换（避免标签不存在问题）
       - name: 安装 arm64-musl 交叉编译环境（OpenWrt 专用）
         if: matrix.arch == 'arm64-musl'
         run: |
-          # 1. 安装最小化编译依赖
+          # 1. 安装编译依赖
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends make git curl gcc g++ patch bison flex texinfo
 
-          # 2. 修复：完整克隆（取消 --depth 1）+ 拉取所有标签 + 切换到存在的 v1.2.5 标签
-          git clone --tags https://github.com/richfelker/musl-cross-make.git
+          # 2. 直接克隆 master 主分支（稳定无标签问题）
+          git clone https://github.com/richfelker/musl-cross-make.git
           cd musl-cross-make
-          # 切换到实际存在的稳定标签 v1.2.5（musl-cross-make 官方确认存在）
-          git checkout tags/v1.2.5
 
-          # 3. 关键配置：禁用测试用例、文档、C++ 等非必需组件
+          # 3. 配置编译参数（禁用非必需组件，减少资源占用）
           cat > config.mak << EOF
           TARGET = aarch64-linux-musl
           OUTPUT = /usr/local/musl-cross
@@ -116,7 +114,7 @@ jobs:
           CONFIG_NO_ATOMIC = 1  # 禁用 atomic
           CFLAGS = -O2  # 编译优化
           CXXFLAGS = -O2
-          MAKEFLAGS = -j2  # 限制并行线程（避免资源耗尽）
+          MAKEFLAGS = -j2  # 限制并行线程
           EOF
 
           # 4. 编译并安装（约 5-8 分钟）
@@ -129,19 +127,16 @@ jobs:
           # 6. 验证编译器（确保命令可用）
           aarch64-linux-musl-gcc --version
 
-      # 优化 Python 编译：禁用不必要的模块
+      # 构建静态链接的 Python（OpenWrt 专用）
       - name: 构建静态链接的 Python（arm64-musl）
         if: matrix.arch == 'arm64-musl'
         run: |
-          # 安装 Python 最小化依赖
           sudo apt-get install -y --no-install-recommends zlib1g-dev libssl-dev libffi-dev
-
-          # 下载 Python 3.10 源码（国内镜像，加快下载）
+          # 国内镜像下载 Python
           wget -c https://mirrors.tuna.tsinghua.edu.cn/python/3.10.13/Python-3.10.13.tgz -O Python-3.10.13.tgz
           tar -xzf Python-3.10.13.tgz
           cd Python-3.10.13
-          
-          # 配置 Python 静态编译
+          # 配置静态编译
           ./configure \
             --prefix=/usr/local/python3.10-musl-arm64 \
             --build=x86_64-linux-gnu \
@@ -166,20 +161,17 @@ jobs:
             CXX=aarch64-linux-musl-g++ \
             AR=aarch64-linux-musl-ar \
             RANLIB=aarch64-linux-musl-ranlib
-
-          # 编译 Python（-j2 避免资源耗尽）
+          # 编译 Python
           make -j2
           sudo make install
-          
-          # 切换到静态 Python
+          # 切换 Python
           export PATH=/usr/local/python3.10-musl-arm64/bin:$PATH
           python3 --version
-          
           # 安装依赖
           python3 -m pip install --upgrade pip
-          pip3 install -r requirements.txt
-          pip3 install pyinstaller
-          pip3 install --upgrade certifi urllib3 requests
+          pip3 install --no-cache-dir --progress-bar off -r requirements.txt
+          pip3 install --no-cache-dir --progress-bar off pyinstaller
+          pip3 install --no-cache-dir --progress-bar off certifi urllib3 requests
 
       # Windows 构建
       - name: 构建可执行文件 (Windows)
@@ -187,11 +179,38 @@ jobs:
         run: |
           python -m PyInstaller --onefile --name CloudflareSpeedTest-${{ matrix.platform }}-${{ matrix.arch }} --clean --console --hidden-import requests --hidden-import urllib3 --hidden-import certifi --hidden-import charset_normalizer --hidden-import idna --exclude-module tkinter --exclude-module matplotlib --exclude-module numpy --exclude-module pandas --exclude-module PIL --exclude-module cv2 --exclude-module scipy --strip --optimize 2 cloudflare_speedtest.py
 
-      # Linux 构建
-      - name: 构建可执行文件 (Linux)
-        if: matrix.platform == 'linux' && matrix.arch != 'arm64-musl'
+      # Linux x64 构建
+      - name: 构建可执行文件 (Linux x64)
+        if: matrix.platform == 'linux' && matrix.arch == 'amd64'
         run: |
           python -m PyInstaller --onefile --name CloudflareSpeedTest-${{ matrix.platform }}-${{ matrix.arch }} --clean --console --hidden-import requests --hidden-import urllib3 --hidden-import certifi --hidden-import charset_normalizer --hidden-import idna --exclude-module tkinter --exclude-module matplotlib --exclude-module numpy --exclude-module pandas --exclude-module PIL --exclude-module cv2 --exclude-module scipy --strip --optimize 2 cloudflare_speedtest.py
+
+      # Linux ARM64 (glibc) 构建（优化资源占用）
+      - name: 构建可执行文件 (Linux ARM64 glibc)
+        if: matrix.platform == 'linux' && matrix.arch == 'arm64' && matrix.static == false
+        run: |
+          python -m PyInstaller \
+            --onefile \
+            --name CloudflareSpeedTest-${{ matrix.platform }}-${{ matrix.arch }} \
+            --clean \
+            --console \
+            --noupx \
+            --hidden-import requests \
+            --hidden-import urllib3 \
+            --hidden-import certifi \
+            --exclude-module tkinter \
+            --exclude-module matplotlib \
+            --exclude-module numpy \
+            --exclude-module pandas \
+            --exclude-module PIL \
+            --exclude-module cv2 \
+            --exclude-module scipy \
+            --exclude-module lib2to3 \
+            --exclude-module turtledemo \
+            --exclude-module idlelib \
+            --strip \
+            --optimize 2 \
+            cloudflare_speedtest.py
 
       # macOS 构建
       - name: 构建可执行文件 (macOS)
